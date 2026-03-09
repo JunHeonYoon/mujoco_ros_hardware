@@ -1,6 +1,7 @@
 #include "mujoco_ros_hardware/mujoco_world_singleton.hpp"
 
 #include <chrono>
+#include <cstdlib>
 #include <unistd.h>
 
 #include "rclcpp/rclcpp.hpp"
@@ -36,6 +37,12 @@ void MujocoWorldSingleton::registerPlugin(int priority)
 bool MujocoWorldSingleton::init()
 {
     if (initialized_) return true;
+
+    // Load MuJoCo decoder plugins (e.g. obj_decoder for .obj mesh support in MuJoCo 3.5+)
+    const char* plugin_path_env = getenv("MUJOCO_PLUGIN_PATH");
+    if (plugin_path_env) {
+        mj_loadAllPluginLibraries(plugin_path_env, nullptr);
+    }
 
     // Create a temporary node to read parameters from controller_manager
     rclcpp::NodeOptions opts;
