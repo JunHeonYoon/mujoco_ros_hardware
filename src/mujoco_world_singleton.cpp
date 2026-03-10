@@ -1,7 +1,7 @@
 #include "mujoco_ros_hardware/mujoco_world_singleton.hpp"
 
 #include <chrono>
-#include <cstdlib>
+#include <dlfcn.h>
 #include <unistd.h>
 
 #include "rclcpp/rclcpp.hpp"
@@ -38,10 +38,16 @@ bool MujocoWorldSingleton::init()
 {
     if (initialized_) return true;
 
-    // Load MuJoCo decoder plugins (e.g. obj_decoder for .obj mesh support in MuJoCo 3.5+)
-    const char* plugin_path_env = getenv("MUJOCO_PLUGIN_PATH");
-    if (plugin_path_env) {
-        mj_loadAllPluginLibraries(plugin_path_env, nullptr);
+    // Load MuJoCo decoder plugins (e.g. obj_decoder for .obj mesh support in MuJoCo 3.5+).
+    // MuJoCo installs plugins to <prefix>/bin/mujoco_plugin; libmujoco.so lives in <prefix>/lib.
+    {
+        Dl_info dl_info;
+        if (dladdr(reinterpret_cast<void*>(mj_version), &dl_info) && dl_info.dli_fname) {
+            std::string mujoco_lib_dir(dl_info.dli_fname);
+            mujoco_lib_dir = mujoco_lib_dir.substr(0, mujoco_lib_dir.find_last_of('/'));
+            const std::string plugin_dir = mujoco_lib_dir + "/../bin/mujoco_plugin";
+            mj_loadAllPluginLibraries(plugin_dir.c_str(), nullptr);
+        }
     }
 
     // Create a temporary node to read parameters from controller_manager
