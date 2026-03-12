@@ -48,12 +48,6 @@ hardware_interface::CallbackReturn FrankaMultiSubHandler::onInit(const hardware_
         robots_.push_back(std::move(ctx));
     }
 
-    // Fix up self-pointers after all robots are emplaced (no more reallocation).
-    for (auto & r : robots_)
-    {
-        r.robot_state_ptr = &r.robot_state;
-        r.robot_model_ptr = &r.mujoco_model;
-    }
 
     // Assign joints to robots by matching joint name against each robot's name_stem.
     for (const auto & joint_info : info.joints)
@@ -121,12 +115,6 @@ std::vector<hardware_interface::StateInterface> FrankaMultiSubHandler::exportSta
             if (j.has_eff_state) si.emplace_back(j.name, hardware_interface::HW_IF_EFFORT,   &j.effort_state);
         }
 
-        // Extra Franka-specific state interfaces per robot (name_stem = prefix + "_" + arm_id)
-        si.emplace_back(robot.name_stem, "robot_time",  &robot.robot_time_state);
-        si.emplace_back(robot.name_stem, "robot_state",
-            reinterpret_cast<double*>(&robot.robot_state_ptr));  // NOLINT
-        si.emplace_back(robot.name_stem, "robot_model",
-            reinterpret_cast<double*>(&robot.robot_model_ptr));  // NOLINT
     }
     return si;
 }
@@ -276,14 +264,6 @@ void FrankaMultiSubHandler::onSceneLoaded()
         mj_forward(m, d);
     }
 
-    // Set up MujocoFrankaModel DOF indices (no MuJoCo data access needed).
-    for (auto & robot : robots_)
-    {
-        std::vector<int> qvel_indices;
-        for (const auto & j : robot.joints)
-            if (j.qvel_idx >= 0) qvel_indices.push_back(j.qvel_idx);
-        robot.mujoco_model.setJointIndices(qvel_indices);
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -309,15 +289,7 @@ hardware_interface::return_type FrankaMultiSubHandler::read(const rclcpp::Time &
             j.pos_state    = d->qpos[j.qpos_idx];
             j.vel_state    = d->qvel[j.qvel_idx];
             j.effort_state = (j.ctrl_idx >= 0) ? d->actuator_force[j.ctrl_idx] : 0.0;
-            // Keep franka::RobotState q/dq/tau up to date (first 7 arm joints only)
-            if (i < 7)
-            {
-                robot.robot_state.q[i]     = j.pos_state;
-                robot.robot_state.dq[i]    = j.vel_state;
-                robot.robot_state.tau_J[i] = j.effort_state;
-            }
         }
-        robot.robot_time_state = d->time;
     }
 
     return hardware_interface::return_type::OK;

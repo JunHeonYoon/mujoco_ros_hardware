@@ -7,11 +7,7 @@
 #include "hardware_interface/system_interface.hpp"
 #include "rclcpp/rclcpp.hpp"
 
-#include <franka/robot_state.h>
-#include "franka_hardware/model.hpp"
-
 #include "mujoco_ros_hardware/sub_handler_base.hpp"
-#include "mujoco_ros_hardware/mujoco_franka_model.hpp"
 
 namespace mujoco_ros_hardware
 {
@@ -26,10 +22,6 @@ namespace mujoco_ros_hardware
  *
  * State interfaces exported:
  *  - {joint_name}/position, velocity, effort
- *  - {name_stem}/robot_time    (simulation time)
- *  - {name_stem}/robot_state   (bit-cast franka::RobotState* as double)
- *  - {name_stem}/robot_model   (bit-cast franka_hardware::Model* as double)
- *  where name_stem = prefix + "_" + arm_id  (or arm_id if prefix is empty).
  */
 class FrankaSubHandler : public SubHandlerBase
 {
@@ -84,17 +76,6 @@ private:
     };
     std::vector<JointData> joints_;
     bool joints_mapped_ = false;
-
-    // ---- Extra state: simulation time ----
-    double robot_time_state_ = 0.0;
-
-    // ---- Robot state (franka::RobotState) exposed via state interface ----
-    franka::RobotState robot_state_{};
-    franka::RobotState * robot_state_ptr_ = &robot_state_;
-
-    // ---- MuJoCo-backed robot model exposed via state interface ----
-    MujocoFrankaModel mujoco_model_;
-    franka_hardware::Model * robot_model_ptr_ = &mujoco_model_;
 
     // ---- Stored for export methods ----
     hardware_interface::HardwareInfo hw_info_;

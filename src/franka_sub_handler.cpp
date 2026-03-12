@@ -64,14 +64,6 @@ std::vector<hardware_interface::StateInterface> FrankaSubHandler::exportStateInt
         }
     }
 
-    // Extra Franka-specific state interfaces (name_stem = prefix + "_" + arm_id, e.g. "left_fr3")
-    si.emplace_back(name_stem_, "robot_time",  &robot_time_state_);
-    // bit-cast pointers to double* for ros2_control StateInterface
-    si.emplace_back(name_stem_, "robot_state",
-        reinterpret_cast<double*>(&robot_state_ptr_));  // NOLINT
-    si.emplace_back(name_stem_, "robot_model",
-        reinterpret_cast<double*>(&robot_model_ptr_));  // NOLINT
-
     return si;
 }
 
@@ -142,14 +134,6 @@ std::string FrankaSubHandler::getXacroArgs() const
 void FrankaSubHandler::onSceneLoaded()
 {
     mapJoints();
-
-    // Set up MujocoFrankaModel with DOF indices for mass/gravity computation
-    std::vector<int> qvel_indices;
-    for (const auto & j : joints_)
-    {
-        if (j.qvel_idx >= 0) qvel_indices.push_back(j.qvel_idx);
-    }
-    mujoco_model_.setJointIndices(qvel_indices);
 }
 
 hardware_interface::return_type FrankaSubHandler::read(const rclcpp::Time &, const rclcpp::Duration &)
@@ -168,15 +152,7 @@ hardware_interface::return_type FrankaSubHandler::read(const rclcpp::Time &, con
         j.pos_state    = d->qpos[j.qpos_idx];
         j.vel_state    = d->qvel[j.qvel_idx];
         j.effort_state = (j.ctrl_idx >= 0) ? d->actuator_force[j.ctrl_idx] : 0.0;
-        // Keep franka::RobotState q/dq up to date (first 7 joints only)
-        if (i < 7)
-        {
-            robot_state_.q[i]     = j.pos_state;
-            robot_state_.dq[i]    = j.vel_state;
-            robot_state_.tau_J[i] = j.effort_state;
-        }
     }
-    robot_time_state_ = d->time;
 
     return hardware_interface::return_type::OK;
 }

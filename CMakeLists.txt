@@ -13,8 +13,6 @@ find_package(rclcpp REQUIRED)
 find_package(hardware_interface REQUIRED)
 find_package(pluginlib REQUIRED)
 find_package(mujoco REQUIRED)
-find_package(Franka REQUIRED)
-find_package(franka_hardware REQUIRED)
 find_package(OpenGL REQUIRED)
 find_package(glfw3 QUIET)
 if(NOT glfw3_FOUND)
@@ -74,7 +72,6 @@ add_library(${PROJECT_NAME} SHARED
     src/mujoco_hardware_interface.cpp
     src/franka_sub_handler.cpp
     src/franka_multi_sub_handler.cpp
-    src/mujoco_franka_model.cpp
     src/husky_sub_handler.cpp
 )
 
@@ -86,7 +83,6 @@ target_include_directories(${PROJECT_NAME} PUBLIC
 target_link_libraries(${PROJECT_NAME} PUBLIC
     mujoco::mujoco
     mujoco_simulate
-    Franka::Franka
     dl
 )
 
@@ -94,7 +90,6 @@ ament_target_dependencies(${PROJECT_NAME} PUBLIC
     rclcpp
     hardware_interface
     pluginlib
-    franka_hardware
 )
 
 pluginlib_export_plugin_description_file(hardware_interface mujoco_hardware_interface_plugin.xml)
@@ -111,7 +106,7 @@ install(DIRECTORY include/
 )
 
 ament_export_targets(${PROJECT_NAME}_targets HAS_LIBRARY_TARGET)
-ament_export_dependencies(rclcpp hardware_interface pluginlib franka_hardware)
+ament_export_dependencies(rclcpp hardware_interface pluginlib)
 ament_export_include_directories(include)
 
 ament_package()

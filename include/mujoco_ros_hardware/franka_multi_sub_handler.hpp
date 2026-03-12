@@ -7,11 +7,7 @@
 #include "hardware_interface/system_interface.hpp"
 #include "rclcpp/rclcpp.hpp"
 
-#include <franka/robot_state.h>
-#include "franka_hardware/model.hpp"
-
 #include "mujoco_ros_hardware/sub_handler_base.hpp"
-#include "mujoco_ros_hardware/mujoco_franka_model.hpp"
 
 namespace mujoco_ros_hardware
 {
@@ -27,10 +23,6 @@ namespace mujoco_ros_hardware
  *
  * State interfaces per robot:
  *  - {joint_name}/position, velocity, effort
- *  - {name_stem_i}/robot_time    (simulation time)
- *  - {name_stem_i}/robot_state   (bit-cast franka::RobotState* as double)
- *  - {name_stem_i}/robot_model   (bit-cast franka_hardware::Model* as double)
- *  where name_stem_i = prefix_i + "_" + arm_id_i  (or arm_id_i if prefix empty)
  *
  * Xacro args:
  *  robot_count:=N arm_id_0:=... hand_0:=... control_mode_0:=... prefix_0:=... ...
@@ -84,11 +76,6 @@ private:
         std::vector<JointData> joints;
         bool joints_mapped = false;
 
-        double robot_time_state = 0.0;
-        franka::RobotState robot_state{};
-        franka::RobotState * robot_state_ptr = nullptr;
-        MujocoFrankaModel mujoco_model;
-        franka_hardware::Model * robot_model_ptr = nullptr;
     };
 
     // Returns the index into robots_ for the given joint name, or robots_.size() if unmatched.
