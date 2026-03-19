@@ -12,6 +12,7 @@ find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(hardware_interface REQUIRED)
 find_package(pluginlib REQUIRED)
+find_package(sensor_msgs REQUIRED)
 find_package(mujoco REQUIRED)
 find_package(OpenGL REQUIRED)
 find_package(glfw3 QUIET)
@@ -90,6 +91,7 @@ ament_target_dependencies(${PROJECT_NAME} PUBLIC
     rclcpp
     hardware_interface
     pluginlib
+    sensor_msgs
 )
 
 pluginlib_export_plugin_description_file(hardware_interface mujoco_hardware_interface_plugin.xml)
@@ -106,7 +108,7 @@ install(DIRECTORY include/
 )
 
 ament_export_targets(${PROJECT_NAME}_targets HAS_LIBRARY_TARGET)
-ament_export_dependencies(rclcpp hardware_interface pluginlib)
+ament_export_dependencies(rclcpp hardware_interface pluginlib sensor_msgs)
 ament_export_include_directories(include)
 
 ament_package()

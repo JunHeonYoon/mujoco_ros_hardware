@@ -65,6 +65,65 @@ ros2 launch fr3_husky_controller fr3_controller.launch.py \
   robot_side:=left load_gripper:=true load_mobile:=false use_mujoco:=true
 ```
 
+### Camera parameters (controller_manager)
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `mujoco_camera_publish_rate` | `double` | `30.0` | Camera image publish rate (Hz) |
+| `mujoco_camera_publish_pointcloud` | `bool` | `false` | Also publish `PointCloud2` per camera |
+
+```python
+cm_params = [
+    ...
+    {'mujoco_camera_publish_rate': 30.0},
+    {'mujoco_camera_publish_pointcloud': False},
+]
+```
+
+---
+
+## Camera RGBD Publishing
+
+Cameras declared in the MJCF are automatically discovered and published as ROS 2 topics in a separate thread (no physics slowdown). Resolution is read from the MJCF `<sensor type="camera" width="..." height="..."/>` element; cameras without a sensor element default to 640×480.
+
+### Topic layout (per camera)
+
+```
+/mujoco_ros_hardware/<camera_name>/color/image_raw          sensor_msgs/Image       (rgb8)
+/mujoco_ros_hardware/<camera_name>/color/camera_info        sensor_msgs/CameraInfo
+/mujoco_ros_hardware/<camera_name>/depth/image_rect_raw     sensor_msgs/Image       (32FC1, metres)
+/mujoco_ros_hardware/<camera_name>/depth/camera_info        sensor_msgs/CameraInfo
+/mujoco_ros_hardware/<camera_name>/depth/points             sensor_msgs/PointCloud2  (optional)
+```
+
+### MJCF camera definition
+
+Declare a fixed camera inside any body in the MJCF scene:
+
+```xml
+<body name="hand">
+  <camera name="hand_eye" pos="0.1 0.0 0.0" euler="3.14159 0.218 0"
+          mode="fixed" fovy="58"/>
+</body>
+```
+
+To specify resolution, add a sensor element (must share the same name):
+
+```xml
+<sensor name="hand_eye" type="camera" camera="hand_eye" width="640" height="480"/>
+```
+
+### Depth image
+
+Depth is metric distance in metres (`32FC1`). Pixels at the far clip plane (no geometry hit) are `NaN`.
+
+The intrinsic matrix assumes MuJoCo's pinhole model (square pixels):
+
+```
+fx = fy = (height / 2) / tan(fovy_rad / 2)
+cx = width / 2,  cy = height / 2
+```
+
 ---
 
 ## Supported Robot Types

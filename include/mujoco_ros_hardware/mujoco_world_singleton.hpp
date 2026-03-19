@@ -2,15 +2,24 @@
 
 #include <atomic>
 #include <condition_variable>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
 #include <unistd.h>
+#include <vector>
 
 #include <mujoco/mujoco.h>
+#include <GLFW/glfw3.h>
 #include "simulate.h"
 #include "glfw_adapter.h"
+
+#include "rclcpp/rclcpp.hpp"
+#include <sensor_msgs/msg/image.hpp>
+#include <sensor_msgs/msg/camera_info.hpp>
+#include <sensor_msgs/msg/point_cloud2.hpp>
+#include <sensor_msgs/msg/point_field.hpp>
 
 namespace mujoco_ros_hardware
 {
@@ -25,6 +34,7 @@ namespace mujoco_ros_hardware
  *  3. loadScene() starts the viewer and the simulation thread.
  *  4. The simulation thread runs mj_step() in real-time (mj_model->opt.timestep).
  *  5. SubHandlers lock dataMutex() to read/write mjData in their read()/write().
+ *  6. A separate camera thread renders each MJCF camera and publishes RGBD images.
  */
 class MujocoWorldSingleton
 {
@@ -70,6 +80,29 @@ private:
     void startSimulation();
     void stopSimulation();
 
+    // ---- Camera RGBD publishing ----
+    struct CameraDesc {
+        int         id;
+        std::string name;
+        int         width;
+        int         height;
+        double      fovy_deg;
+
+        rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr      rgb_pub;
+        rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr      depth_pub;
+        rclcpp::Publisher<sensor_msgs::msg::CameraInfo>::SharedPtr rgb_info_pub;
+        rclcpp::Publisher<sensor_msgs::msg::CameraInfo>::SharedPtr depth_info_pub;
+        rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr cloud_pub;  // optional
+
+        // Pre-computed, stamp updated per frame
+        sensor_msgs::msg::CameraInfo camera_info_msg;
+    };
+
+    void discoverCameras();
+    sensor_msgs::msg::CameraInfo buildCameraInfoMsg(const CameraDesc & cam) const;
+    void startCameraThread();
+    void stopCameraThread();
+
     // ---- Registration state ----
     int total_plugins_ = 0;
     int max_priority_  = 0;
@@ -80,9 +113,13 @@ private:
     std::string xacro_path_;
     std::string xacro_base_args_;
 
+    // ---- Camera config (from controller_manager params) ----
+    double camera_publish_rate_hz_ = 30.0;
+    bool   publish_pointcloud_     = false;
+
     // ---- MuJoCo world ----
-    mjModel * model_       = nullptr;
-    mjData  * data_        = nullptr;
+    mjModel * model_        = nullptr;
+    mjData  * data_         = nullptr;
     bool      scene_loaded_ = false;
 
     // ---- Simulation thread ----
@@ -98,6 +135,17 @@ private:
     std::mutex  sim_ready_mtx_;
     bool        sim_ready_ = false;
     std::condition_variable sim_ready_cv_;
+
+    // ---- Camera publishing ----
+    std::vector<CameraDesc> cameras_;
+    rclcpp::Node::SharedPtr cam_node_;
+    std::thread             camera_thread_;
+    std::atomic<bool>       cam_running_ {false};
+    // Hidden window sized to max camera resolution – render to its default
+    // framebuffer (mjFB_WINDOW) to avoid offscreen FBO complications.
+    GLFWwindow *            offscreen_window_ = nullptr;  // created in render_thread_
+    int                     offscreen_width_  = 640;
+    int                     offscreen_height_ = 480;
 
     // ---- Protects model_/data_ during read/write/step ----
     std::mutex data_mutex_;
