@@ -47,6 +47,23 @@ hardware_interface::CallbackReturn FrankaSubHandler::onInit(const hardware_inter
         }
     }
 
+    // Create in-process gripper action server when gripper is enabled.
+    // Namespace: hw_param "gripper_namespace" takes priority; otherwise derived as
+    //   "{arm_prefix}_franka_gripper" (prefix set) or "franka_gripper" (no prefix).
+    if (hand_ == "true") {
+        std::string gripper_ns = getParam(info, "gripper_namespace", "");
+        if (gripper_ns.empty()) {
+            gripper_ns = arm_prefix_.empty() ? "franka_gripper"
+                                              : (arm_prefix_ + "_franka_gripper");
+        }
+        const std::string stem = arm_prefix_.empty() ? arm_id_ : (arm_prefix_ + "_" + arm_id_);
+        gripper_server_ = std::make_unique<MujocoGripperActionServer>(
+            gripper_ns,
+            stem + "_finger_joint1",
+            stem + "_finger_joint2",
+            stem + "_hand");  // MuJoCo tendon actuator name
+    }
+
     return hardware_interface::CallbackReturn::SUCCESS;
 }
 
@@ -134,6 +151,7 @@ std::string FrankaSubHandler::getXacroArgs() const
 void FrankaSubHandler::onSceneLoaded()
 {
     mapJoints();
+    if (gripper_server_) gripper_server_->onSceneLoaded();
 }
 
 hardware_interface::return_type FrankaSubHandler::read(const rclcpp::Time &, const rclcpp::Duration &)
@@ -169,6 +187,8 @@ hardware_interface::return_type FrankaSubHandler::write(const rclcpp::Time &, co
     for (const auto & j : joints_)
     {
         if (j.ctrl_idx < 0) continue;
+        // Finger joints are driven by MujocoGripperActionServer; skip them here.
+        if (j.name.find("finger_joint") != std::string::npos) continue;
         if      (control_mode_ == "position") d->ctrl[j.ctrl_idx] = j.pos_cmd;
         else if (control_mode_ == "velocity") d->ctrl[j.ctrl_idx] = j.vel_cmd;
         else                                   d->ctrl[j.ctrl_idx] = j.effort_cmd;

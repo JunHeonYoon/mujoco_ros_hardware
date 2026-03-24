@@ -1,4 +1,5 @@
 #include "mujoco_ros_hardware/franka_multi_sub_handler.hpp"
+#include "mujoco_ros_hardware/mujoco_gripper_action_server.hpp"
 #include "mujoco_ros_hardware/sub_handler_registry.hpp"
 
 #include <algorithm>
@@ -86,14 +87,27 @@ hardware_interface::CallbackReturn FrankaMultiSubHandler::onInit(const hardware_
         robots_[ridx].joints.push_back(std::move(jd));
     }
 
-    // Log assignment summary
+    // Log assignment summary + create gripper servers
     for (size_t i = 0; i < robots_.size(); ++i)
     {
+        auto & r = robots_[i];
         RCLCPP_INFO(
             rclcpp::get_logger("FrankaMultiSubHandler"),
             "\033[34mRobot[%zu] name_stem='%s' hand=%s joints=%zu\033[0m",
-            i, robots_[i].name_stem.c_str(), robots_[i].hand.c_str(),
-            robots_[i].joints.size());
+            i, r.name_stem.c_str(), r.hand.c_str(), r.joints.size());
+
+        if (r.hand == "true") {
+            std::string gripper_ns = getParam(info, "gripper_namespace_" + std::to_string(i), "");
+            if (gripper_ns.empty()) {
+                gripper_ns = r.arm_prefix.empty() ? "franka_gripper"
+                                                   : (r.arm_prefix + "_franka_gripper");
+            }
+            r.gripper_server = std::make_unique<MujocoGripperActionServer>(
+                gripper_ns,
+                r.name_stem + "_finger_joint1",
+                r.name_stem + "_finger_joint2",
+                r.name_stem + "_hand");
+        }
     }
 
     return hardware_interface::CallbackReturn::SUCCESS;
@@ -264,6 +278,11 @@ void FrankaMultiSubHandler::onSceneLoaded()
         mj_forward(m, d);
     }
 
+    // Notify gripper servers after joints are mapped (outside data_mutex_ scope).
+    for (auto & robot : robots_)
+    {
+        if (robot.gripper_server) robot.gripper_server->onSceneLoaded();
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -310,6 +329,8 @@ hardware_interface::return_type FrankaMultiSubHandler::write(const rclcpp::Time 
         for (const auto & j : robot.joints)
         {
             if (j.ctrl_idx < 0) continue;
+            // Finger joints are driven by MujocoGripperActionServer; skip them here.
+            if (j.name.find("finger_joint") != std::string::npos) continue;
             if      (robot.control_mode == "position") d->ctrl[j.ctrl_idx] = j.pos_cmd;
             else if (robot.control_mode == "velocity") d->ctrl[j.ctrl_idx] = j.vel_cmd;
             else                                       d->ctrl[j.ctrl_idx] = j.effort_cmd;

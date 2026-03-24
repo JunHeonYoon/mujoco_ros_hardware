@@ -1,5 +1,6 @@
 #pragma once
 
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -7,6 +8,7 @@
 #include "hardware_interface/system_interface.hpp"
 #include "rclcpp/rclcpp.hpp"
 
+#include "mujoco_ros_hardware/mujoco_gripper_action_server.hpp"
 #include "mujoco_ros_hardware/sub_handler_base.hpp"
 
 namespace mujoco_ros_hardware
@@ -76,6 +78,7 @@ private:
         std::vector<JointData> joints;
         bool joints_mapped = false;
 
+        std::unique_ptr<MujocoGripperActionServer> gripper_server;
     };
 
     // Returns the index into robots_ for the given joint name, or robots_.size() if unmatched.
