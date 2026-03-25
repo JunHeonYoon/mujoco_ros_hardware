@@ -63,6 +63,17 @@ MujocoGripperActionServer::MujocoGripperActionServer(
         [this](std::shared_ptr<GoalHandleGrasp> gh)
             { handleGraspAccepted(gh); });
 
+    // ----- Homing action (absolute name) -----
+    // In simulation the gripper is already homed; immediately succeeds.
+    homing_server_ = rclcpp_action::create_server<Homing>(
+        node_, abs_prefix + "/homing",
+        [this](const rclcpp_action::GoalUUID & uuid, std::shared_ptr<const Homing::Goal> goal)
+            { return handleHomingGoal(uuid, goal); },
+        [this](std::shared_ptr<GoalHandleHoming> gh)
+            { return handleHomingCancel(gh); },
+        [this](std::shared_ptr<GoalHandleHoming> gh)
+            { handleHomingAccepted(gh); });
+
     // ----- Stop service (absolute name) -----
     stop_service_ = node_->create_service<std_srvs::srv::Trigger>(
         abs_prefix + "/stop",
@@ -394,6 +405,33 @@ void MujocoGripperActionServer::stopCallback(
     response->success = true;
     response->message = "Gripper stopped";
     RCLCPP_INFO(node_->get_logger(), "Gripper stopped at current position");
+}
+
+// ---------------------------------------------------------------------------
+// Homing action — immediately succeeds (no physical homing needed in sim)
+// ---------------------------------------------------------------------------
+
+rclcpp_action::GoalResponse MujocoGripperActionServer::handleHomingGoal(
+    const rclcpp_action::GoalUUID &,
+    std::shared_ptr<const Homing::Goal>)
+{
+    RCLCPP_INFO(node_->get_logger(), "Homing goal received (sim: instant success)");
+    return rclcpp_action::GoalResponse::ACCEPT_AND_EXECUTE;
+}
+
+rclcpp_action::CancelResponse MujocoGripperActionServer::handleHomingCancel(
+    std::shared_ptr<GoalHandleHoming>)
+{
+    return rclcpp_action::CancelResponse::ACCEPT;
+}
+
+void MujocoGripperActionServer::handleHomingAccepted(std::shared_ptr<GoalHandleHoming> gh)
+{
+    // Open the gripper to max width as part of homing, then immediately succeed.
+    setTargetWidth(kMaxWidth);
+    auto result = std::make_shared<Homing::Result>();
+    result->success = true;
+    gh->succeed(result);
 }
 
 }  // namespace mujoco_ros_hardware

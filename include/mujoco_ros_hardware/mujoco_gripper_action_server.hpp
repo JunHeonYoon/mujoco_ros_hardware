@@ -12,6 +12,7 @@
 #include <std_srvs/srv/trigger.hpp>
 
 #include <franka_msgs/action/grasp.hpp>
+#include <franka_msgs/action/homing.hpp>
 #include <franka_msgs/action/move.hpp>
 
 namespace mujoco_ros_hardware
@@ -51,10 +52,12 @@ public:
     void onSceneLoaded();
 
 private:
-    using Move  = franka_msgs::action::Move;
-    using Grasp = franka_msgs::action::Grasp;
-    using GoalHandleMove  = rclcpp_action::ServerGoalHandle<Move>;
-    using GoalHandleGrasp = rclcpp_action::ServerGoalHandle<Grasp>;
+    using Move   = franka_msgs::action::Move;
+    using Grasp  = franka_msgs::action::Grasp;
+    using Homing = franka_msgs::action::Homing;
+    using GoalHandleMove   = rclcpp_action::ServerGoalHandle<Move>;
+    using GoalHandleGrasp  = rclcpp_action::ServerGoalHandle<Grasp>;
+    using GoalHandleHoming = rclcpp_action::ServerGoalHandle<Homing>;
 
     // ---- Joint / actuator mapping ----
     std::string joint1_name_, joint2_name_;
@@ -72,8 +75,9 @@ private:
     rclcpp::executors::SingleThreadedExecutor executor_;
     std::thread executor_thread_;
 
-    rclcpp_action::Server<Move>::SharedPtr  move_server_;
-    rclcpp_action::Server<Grasp>::SharedPtr grasp_server_;
+    rclcpp_action::Server<Move>::SharedPtr   move_server_;
+    rclcpp_action::Server<Grasp>::SharedPtr  grasp_server_;
+    rclcpp_action::Server<Homing>::SharedPtr homing_server_;
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr stop_service_;
     rclcpp::Publisher<sensor_msgs::msg::JointState>::SharedPtr js_pub_;
     rclcpp::TimerBase::SharedPtr control_timer_;
@@ -98,6 +102,11 @@ private:
     rclcpp_action::CancelResponse handleGraspCancel(std::shared_ptr<GoalHandleGrasp>);
     void handleGraspAccepted(std::shared_ptr<GoalHandleGrasp>);
     void executeGrasp(std::shared_ptr<GoalHandleGrasp>);
+
+    // ---- Homing action ----
+    rclcpp_action::GoalResponse   handleHomingGoal(const rclcpp_action::GoalUUID &, std::shared_ptr<const Homing::Goal>);
+    rclcpp_action::CancelResponse handleHomingCancel(std::shared_ptr<GoalHandleHoming>);
+    void handleHomingAccepted(std::shared_ptr<GoalHandleHoming>);
 
     // ---- Stop service ----
     void stopCallback(
