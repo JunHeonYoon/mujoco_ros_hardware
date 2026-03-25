@@ -68,7 +68,8 @@ private:
 
     // ---- Target width in metres (mutex-protected) ----
     mutable std::mutex target_mtx_;
-    double target_width_ = 0.08;   // default: fully open
+    double target_width_ = 0.08;          // default: fully open
+    std::atomic<bool> pending_home_{false}; // homing requested before scene was loaded
 
     // ---- ROS2 node + executor ----
     rclcpp::Node::SharedPtr node_;

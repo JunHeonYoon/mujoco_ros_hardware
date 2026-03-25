@@ -144,10 +144,14 @@ void MujocoGripperActionServer::mapJoints()
     qpos2_     = m->jnt_qposadr[j2];
     hand_ctrl_ = ha;   // may be -1 if no actuator (passive)
 
-    // Initialise target to current position.
+    // Initialise target: honour a pending homing request, otherwise use current position.
     {
         std::lock_guard<std::mutex> tl(target_mtx_);
-        target_width_ = d->qpos[qpos1_] + d->qpos[qpos2_];
+        if (pending_home_.exchange(false)) {
+            target_width_ = kMaxWidth;
+        } else {
+            target_width_ = d->qpos[qpos1_] + d->qpos[qpos2_];
+        }
     }
 
     joints_mapped_.store(true);
@@ -427,8 +431,13 @@ rclcpp_action::CancelResponse MujocoGripperActionServer::handleHomingCancel(
 
 void MujocoGripperActionServer::handleHomingAccepted(std::shared_ptr<GoalHandleHoming> gh)
 {
-    // Open the gripper to max width as part of homing, then immediately succeed.
-    setTargetWidth(kMaxWidth);
+    // Mark pending so mapJoints() will apply kMaxWidth even if called after this.
+    pending_home_.store(true);
+    // If joints are already mapped, apply immediately.
+    if (joints_mapped_.load()) {
+        setTargetWidth(kMaxWidth);
+        pending_home_.store(false);
+    }
     auto result = std::make_shared<Homing::Result>();
     result->success = true;
     gh->succeed(result);
