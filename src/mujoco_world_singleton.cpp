@@ -5,7 +5,11 @@
 #include <cmath>
 #include <cstring>
 #include <dlfcn.h>
+#include <fstream>
 #include <limits>
+#include <optional>
+#include <regex>
+#include <sstream>
 #include <unistd.h>
 
 #include "rclcpp/rclcpp.hpp"
@@ -13,6 +17,102 @@
 
 namespace mujoco_ros_hardware
 {
+
+namespace
+{
+
+std::optional<int> extractMjcfLineNumber(const std::string & error)
+{
+    static const std::regex line_regex(R"(line\s+([0-9]+))");
+    std::smatch match;
+    if (!std::regex_search(error, match, line_regex) || match.size() < 2) {
+        return std::nullopt;
+    }
+
+    try {
+        return std::stoi(match[1].str());
+    } catch (...) {
+        return std::nullopt;
+    }
+}
+
+std::string buildMjcfContext(const std::string & xml, int line, int radius = 2)
+{
+    if (line <= 0) return {};
+
+    const int first_line = std::max(1, line - radius);
+    const int last_line = line + radius;
+
+    std::istringstream stream(xml);
+    std::ostringstream out;
+    std::string current;
+    int current_line = 1;
+
+    while (std::getline(stream, current)) {
+        if (current_line > last_line) break;
+        if (current_line >= first_line) {
+            out << ((current_line == line) ? ">> " : "   ")
+                << current_line << " | " << current << '\n';
+        }
+        ++current_line;
+    }
+
+    return out.str();
+}
+
+std::string readFileOrEmpty(const std::string & path)
+{
+    std::ifstream file(path);
+    if (!file) return {};
+
+    std::ostringstream buffer;
+    buffer << file.rdbuf();
+    return buffer.str();
+}
+
+std::string dumpExpandedMjcfToTmp(const std::string & xml, const char * stage)
+{
+    const auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+
+    std::ostringstream path;
+    path << "/tmp/mujoco_" << stage << "_failed_" << getpid() << "_" << now_ms << ".xml";
+
+    std::ofstream out(path.str());
+    if (!out) return {};
+
+    out << xml;
+    return path.str();
+}
+
+void logMjcfFailure(
+    const std::string & stage,
+    const std::string & detail,
+    const std::optional<std::string> & xml = std::nullopt,
+    const std::optional<std::string> & dumped_path = std::nullopt)
+{
+    const auto logger = rclcpp::get_logger("MujocoWorldSingleton");
+    RCLCPP_ERROR_STREAM(logger, "\033[31m" << stage << " failed:\n" << detail << "\033[0m");
+
+    if (xml) {
+        if (const auto line = extractMjcfLineNumber(detail)) {
+            const std::string context = buildMjcfContext(*xml, *line);
+            if (!context.empty()) {
+                RCLCPP_ERROR_STREAM(
+                    logger,
+                    "\033[31mMJCF context around line " << *line << ":\n" << context << "\033[0m");
+            }
+        }
+    }
+
+    if (dumped_path && !dumped_path->empty()) {
+        RCLCPP_ERROR_STREAM(
+            logger,
+            "\033[31mExpanded MJCF saved to: " << *dumped_path << "\033[0m");
+    }
+}
+
+}  // namespace
 
 MujocoWorldSingleton & MujocoWorldSingleton::get()
 {
@@ -131,14 +231,17 @@ bool MujocoWorldSingleton::loadSceneFromPath(const std::string & xml_path)
 
         if (data_)  { mj_deleteData(data_);   data_  = nullptr; }
         if (model_) { mj_deleteModel(model_); model_ = nullptr; }
+        scene_loaded_ = false;
 
         char err[1000] = {};
         model_ = mj_loadXML(xml_path.c_str(), nullptr, err, sizeof(err));
         if (!model_)
         {
-            RCLCPP_ERROR(
-                rclcpp::get_logger("MujocoWorldSingleton"),
-                "\033[31mmj_loadXML failed:  %s\033[0m", err);
+            const std::string xml = readFileOrEmpty(xml_path);
+            logMjcfFailure(
+                "mj_loadXML(" + xml_path + ")",
+                err,
+                xml.empty() ? std::nullopt : std::make_optional(xml));
             return false;
         }
 
@@ -166,26 +269,35 @@ bool MujocoWorldSingleton::loadSceneFromXML(const std::string & xml_string)
 
         if (data_)  { mj_deleteData(data_);   data_  = nullptr; }
         if (model_) { mj_deleteModel(model_); model_ = nullptr; }
+        scene_loaded_ = false;
 
         char err[1000] = {};
         mjSpec * spec = mj_parseXMLString(xml_string.c_str(), nullptr, err, sizeof(err));
         if (!spec)
         {
-            RCLCPP_ERROR(
-                rclcpp::get_logger("MujocoWorldSingleton"),
-                "\033[31mmj_parseXMLString failed: %s\033[0m", err);
+            const std::string dumped_path = dumpExpandedMjcfToTmp(xml_string, "parse");
+            logMjcfFailure(
+                "mj_parseXMLString",
+                err,
+                xml_string,
+                dumped_path.empty() ? std::nullopt : std::make_optional(dumped_path));
             return false;
         }
 
         model_ = mj_compile(spec, nullptr);
-        mj_deleteSpec(spec);
         if (!model_)
         {
-            RCLCPP_ERROR(
-                rclcpp::get_logger("MujocoWorldSingleton"),
-                "\033[31mmj_compile failed\033[0m");
+            const char * compile_err = mjs_getError(spec);
+            const std::string dumped_path = dumpExpandedMjcfToTmp(xml_string, "compile");
+            logMjcfFailure(
+                "mj_compile",
+                compile_err ? compile_err : "unknown compiler error",
+                xml_string,
+                dumped_path.empty() ? std::nullopt : std::make_optional(dumped_path));
+            mj_deleteSpec(spec);
             return false;
         }
+        mj_deleteSpec(spec);
 
         data_ = mj_makeData(model_);
         mj_forward(model_, data_);
