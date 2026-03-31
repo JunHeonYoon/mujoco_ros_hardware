@@ -84,9 +84,12 @@ private:
     struct CameraDesc {
         int         id;
         std::string name;
+        std::string topic_name;
         int         width;
         int         height;
         double      fovy_deg;
+        bool        publish_rgb = true;
+        bool        publish_depth = true;
 
         rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr      rgb_pub;
         rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr      depth_pub;

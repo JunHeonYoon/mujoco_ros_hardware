@@ -21,6 +21,46 @@ namespace mujoco_ros_hardware
 namespace
 {
 
+struct CameraTopicConfig
+{
+    std::string topic_name;
+    bool publish_rgb = true;
+    bool publish_depth = true;
+};
+
+bool endsWith(const std::string & value, const std::string & suffix)
+{
+    return value.size() >= suffix.size() &&
+           value.compare(value.size() - suffix.size(), suffix.size(), suffix) == 0;
+}
+
+CameraTopicConfig resolveCameraTopicConfig(const std::string & camera_name)
+{
+    CameraTopicConfig config;
+    config.topic_name = camera_name;
+
+    auto strip_suffix = [&](const std::string & suffix, bool publish_rgb, bool publish_depth)
+    {
+        config.publish_rgb = publish_rgb;
+        config.publish_depth = publish_depth;
+        config.topic_name.resize(camera_name.size() - suffix.size());
+        while (!config.topic_name.empty() && config.topic_name.back() == '_') {
+            config.topic_name.pop_back();
+        }
+        if (config.topic_name.empty()) {
+            config.topic_name = camera_name;
+        }
+    };
+
+    if (endsWith(camera_name, "color")) {
+        strip_suffix("color", true, false);
+    } else if (endsWith(camera_name, "depth")) {
+        strip_suffix("depth", false, true);
+    }
+
+    return config;
+}
+
 std::optional<int> extractMjcfLineNumber(const std::string & error)
 {
     static const std::regex line_regex(R"(line\s+([0-9]+))");
@@ -342,6 +382,10 @@ void MujocoWorldSingleton::discoverCameras()
         CameraDesc cam;
         cam.id       = i;
         cam.name     = raw_name;
+        const auto topic_config = resolveCameraTopicConfig(cam.name);
+        cam.topic_name = topic_config.topic_name;
+        cam.publish_rgb = topic_config.publish_rgb;
+        cam.publish_depth = topic_config.publish_depth;
         // cam_resolution[2*i] / [2*i+1]: set by <sensor type="camera" width/height>;
         // default to 640×480 when not specified (value is 0).
         cam.width    = (model_->cam_resolution[2 * i]     > 0) ? model_->cam_resolution[2 * i]     : 640;
@@ -357,22 +401,27 @@ void MujocoWorldSingleton::discoverCameras()
         //   /mujoco_ros_hardware/<name>/depth/image_rect_raw   (32FC1, meters)
         //   /mujoco_ros_hardware/<name>/depth/camera_info
         //   /mujoco_ros_hardware/<name>/depth/points           (optional)
-        const std::string base = "/mujoco_ros_hardware/" + cam.name;
+        const std::string base = "/mujoco_ros_hardware/" + cam.topic_name;
         const auto qos = rclcpp::QoS(1);
 
-        cam.rgb_pub        = cam_node_->create_publisher<sensor_msgs::msg::Image>     (base + "/color/image_raw",       qos);
-        cam.depth_pub      = cam_node_->create_publisher<sensor_msgs::msg::Image>     (base + "/depth/image_rect_raw",  qos);
-        cam.rgb_info_pub   = cam_node_->create_publisher<sensor_msgs::msg::CameraInfo>(base + "/color/camera_info",     qos);
-        cam.depth_info_pub = cam_node_->create_publisher<sensor_msgs::msg::CameraInfo>(base + "/depth/camera_info",     qos);
+        if (cam.publish_rgb) {
+            cam.rgb_pub      = cam_node_->create_publisher<sensor_msgs::msg::Image>     (base + "/color/image_raw",      qos);
+            cam.rgb_info_pub = cam_node_->create_publisher<sensor_msgs::msg::CameraInfo>(base + "/color/camera_info",    qos);
+        }
+        if (cam.publish_depth) {
+            cam.depth_pub      = cam_node_->create_publisher<sensor_msgs::msg::Image>     (base + "/depth/image_rect_raw", qos);
+            cam.depth_info_pub = cam_node_->create_publisher<sensor_msgs::msg::CameraInfo>(base + "/depth/camera_info",   qos);
+        }
 
-        if (publish_pointcloud_)
+        if (publish_pointcloud_ && cam.publish_rgb && cam.publish_depth)
             cam.cloud_pub = cam_node_->create_publisher<sensor_msgs::msg::PointCloud2>(base + "/depth/points", qos);
 
         cam.camera_info_msg = buildCameraInfoMsg(cam);
 
         RCLCPP_INFO(rclcpp::get_logger("MujocoWorldSingleton"),
-            "\033[34mCamera '%s' (id=%d): %dx%d  fovy=%.1f°\033[0m",
-            cam.name.c_str(), cam.id, cam.width, cam.height, cam.fovy_deg);
+            "\033[34mCamera '%s' -> topic '%s' (id=%d): %dx%d  fovy=%.1f°  rgb=%s depth=%s\033[0m",
+            cam.name.c_str(), cam.topic_name.c_str(), cam.id, cam.width, cam.height, cam.fovy_deg,
+            cam.publish_rgb ? "yes" : "no", cam.publish_depth ? "yes" : "no");
 
         cameras_.push_back(std::move(cam));
     }
@@ -613,6 +662,7 @@ void MujocoWorldSingleton::startCameraThread()
                 }
 
                 // ---- Publish RGB image (move buffer – do after point cloud use) ----
+                if (cam.publish_rgb && cam.rgb_pub)
                 {
                     sensor_msgs::msg::Image img;
                     img.header   = hdr;
@@ -625,6 +675,7 @@ void MujocoWorldSingleton::startCameraThread()
                 }
 
                 // ---- Publish Depth image (32FC1, meters) ----
+                if (cam.publish_depth && cam.depth_pub)
                 {
                     sensor_msgs::msg::Image img;
                     img.header   = hdr;
@@ -638,10 +689,16 @@ void MujocoWorldSingleton::startCameraThread()
                 }
 
                 // ---- Publish CameraInfo (same intrinsics for colour and depth) ----
+                if (cam.publish_rgb && cam.rgb_info_pub)
                 {
                     auto info    = cam.camera_info_msg;
                     info.header  = hdr;
                     cam.rgb_info_pub->publish(info);
+                }
+                if (cam.publish_depth && cam.depth_info_pub)
+                {
+                    auto info    = cam.camera_info_msg;
+                    info.header  = hdr;
                     cam.depth_info_pub->publish(info);
                 }
             }  // for cameras_
