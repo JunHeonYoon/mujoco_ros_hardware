@@ -1,15 +1,19 @@
 #include "mujoco_ros_hardware/mujoco_world_singleton.hpp"
 
 #include <algorithm>
+#include <cerrno>
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <dlfcn.h>
+#include <filesystem>
 #include <fstream>
 #include <limits>
 #include <optional>
 #include <regex>
 #include <sstream>
+#include <sys/mman.h>
 #include <unistd.h>
 
 #include "rclcpp/rclcpp.hpp"
@@ -59,6 +63,49 @@ CameraTopicConfig resolveCameraTopicConfig(const std::string & camera_name)
     }
 
     return config;
+}
+
+void loadMujocoDecoderPlugin(const std::string & path)
+{
+    int flags = RTLD_NOW | RTLD_GLOBAL;
+#ifdef RTLD_NODELETE
+    flags |= RTLD_NODELETE;
+#endif
+
+    dlerror();
+    void * handle = dlopen(path.c_str(), flags);
+    if (!handle)
+    {
+        const char * err = dlerror();
+        RCLCPP_WARN(
+            rclcpp::get_logger("MujocoWorldSingleton"),
+            "Could not load MuJoCo decoder plugin '%s': %s",
+            path.c_str(), err ? err : "unknown error");
+    }
+    else
+    {
+        RCLCPP_INFO(
+            rclcpp::get_logger("MujocoWorldSingleton"),
+            "Loaded MuJoCo decoder plugin: %s",
+            path.c_str());
+    }
+}
+
+void maybeInitializeX11Threads()
+{
+#ifndef __APPLE__
+    static const bool initialized = []()
+    {
+        void * libx11 = dlopen("libX11.so.6", RTLD_LAZY | RTLD_LOCAL);
+        if (!libx11) return true;
+
+        using XInitThreadsFn = int (*)();
+        auto * x_init_threads = reinterpret_cast<XInitThreadsFn>(dlsym(libx11, "XInitThreads"));
+        if (x_init_threads) x_init_threads();
+        return true;
+    }();
+    (void)initialized;
+#endif
 }
 
 std::optional<int> extractMjcfLineNumber(const std::string & error)
@@ -115,14 +162,15 @@ std::string dumpExpandedMjcfToTmp(const std::string & xml, const char * stage)
     const auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::system_clock::now().time_since_epoch()).count();
 
-    std::ostringstream path;
-    path << "/tmp/mujoco_" << stage << "_failed_" << getpid() << "_" << now_ms << ".xml";
+    const auto path = std::filesystem::temp_directory_path() /
+        ("mujoco_" + std::string(stage) + "_failed_" +
+         std::to_string(getpid()) + "_" + std::to_string(now_ms) + ".xml");
 
-    std::ofstream out(path.str());
+    std::ofstream out(path);
     if (!out) return {};
 
     out << xml;
-    return path.str();
+    return path.string();
 }
 
 void logMjcfFailure(
@@ -179,6 +227,39 @@ void MujocoWorldSingleton::registerPlugin(int priority)
         total_plugins_, priority, max_priority_);
 }
 
+void MujocoWorldSingleton::primeGraphicsRuntime()
+{
+#ifndef __APPLE__
+    static const bool primed = []()
+    {
+        maybeInitializeX11Threads();
+        return true;
+    }();
+    (void)primed;
+#endif
+}
+
+void MujocoWorldSingleton::unlockRealtimeMemoryForGraphics()
+{
+#ifndef __APPLE__
+    static const bool unlocked = []()
+    {
+        if (munlockall() != 0) {
+            RCLCPP_DEBUG(
+                rclcpp::get_logger("MujocoWorldSingleton"),
+                "munlockall() before MuJoCo graphics setup returned errno=%d (%s)",
+                errno, std::strerror(errno));
+        } else {
+            RCLCPP_INFO(
+                rclcpp::get_logger("MujocoWorldSingleton"),
+                "Released process memory lock before MuJoCo graphics setup");
+        }
+        return true;
+    }();
+    (void)unlocked;
+#endif
+}
+
 bool MujocoWorldSingleton::init()
 {
     if (initialized_) return true;
@@ -190,6 +271,8 @@ bool MujocoWorldSingleton::init()
             std::string mujoco_lib_dir(dl_info.dli_fname);
             mujoco_lib_dir = mujoco_lib_dir.substr(0, mujoco_lib_dir.find_last_of('/'));
             const std::string plugin_dir = mujoco_lib_dir + "/../bin/mujoco_plugin";
+            loadMujocoDecoderPlugin(plugin_dir + "/libobj_decoder.so");
+            loadMujocoDecoderPlugin(plugin_dir + "/libstl_decoder.so");
             mj_loadAllPluginLibraries(plugin_dir.c_str(), nullptr);
         }
     }
@@ -292,9 +375,14 @@ bool MujocoWorldSingleton::loadSceneFromPath(const std::string & xml_path)
 
     RCLCPP_INFO(
         rclcpp::get_logger("MujocoWorldSingleton"),
-        "\033[34mScene loaded: nq=%d nv=%d nu=%d njnt=%d ncam=%d\033[0m",
-        model_->nq, model_->nv, model_->nu, model_->njnt, model_->ncam);
+        "\033[34mScene loaded: nq=%lld nv=%lld nu=%lld njnt=%lld ncam=%lld\033[0m",
+        static_cast<long long>(model_->nq),
+        static_cast<long long>(model_->nv),
+        static_cast<long long>(model_->nu),
+        static_cast<long long>(model_->njnt),
+        static_cast<long long>(model_->ncam));
 
+    prepareRenderOptions();
     discoverCameras();
     startViewer();
     startCameraThread();
@@ -346,9 +434,14 @@ bool MujocoWorldSingleton::loadSceneFromXML(const std::string & xml_string)
 
     RCLCPP_INFO(
         rclcpp::get_logger("MujocoWorldSingleton"),
-        "\033[34mScene loaded: nq=%d nv=%d nu=%d njnt=%d ncam=%d\033[0m",
-        model_->nq, model_->nv, model_->nu, model_->njnt, model_->ncam);
+        "\033[34mScene loaded: nq=%lld nv=%lld nu=%lld njnt=%lld ncam=%lld\033[0m",
+        static_cast<long long>(model_->nq),
+        static_cast<long long>(model_->nv),
+        static_cast<long long>(model_->nu),
+        static_cast<long long>(model_->njnt),
+        static_cast<long long>(model_->ncam));
 
+    prepareRenderOptions();
     discoverCameras();
     startViewer();
     startCameraThread();
@@ -359,6 +452,32 @@ bool MujocoWorldSingleton::loadSceneFromXML(const std::string & xml_string)
 // ---------------------------------------------------------------------------
 // Camera RGBD publishing
 // ---------------------------------------------------------------------------
+
+void MujocoWorldSingleton::prepareRenderOptions()
+{
+    if (!model_) return;
+
+    model_->vis.global.offwidth = std::max(model_->vis.global.offwidth, 640);
+    model_->vis.global.offheight = std::max(model_->vis.global.offheight, 480);
+
+    if (model_->vis.quality.offsamples != 0)
+    {
+        RCLCPP_INFO(
+            rclcpp::get_logger("MujocoWorldSingleton"),
+            "\033[34mMuJoCo offscreen samples: %d -> 0\033[0m",
+            model_->vis.quality.offsamples);
+        model_->vis.quality.offsamples = 0;
+    }
+
+    if (model_->vis.quality.shadowsize != 0)
+    {
+        RCLCPP_INFO(
+            rclcpp::get_logger("MujocoWorldSingleton"),
+            "\033[34mMuJoCo shadow map size: %d -> 0\033[0m",
+            model_->vis.quality.shadowsize);
+        model_->vis.quality.shadowsize = 0;
+    }
+}
 
 void MujocoWorldSingleton::discoverCameras()
 {
@@ -431,15 +550,6 @@ void MujocoWorldSingleton::discoverCameras()
         offscreen_width_  = max_w;
         offscreen_height_ = max_h;
 
-        // Tell MuJoCo the required offscreen FBO dimensions BEFORE mjr_makeContext
-        // is called in the camera thread.  mjr_makeContext creates the offscreen FBO
-        // sized to model->vis.global.offwidth × offheight; if these are 0 (or the
-        // compiled-in default 640×480 happens to be too small), the FBO will not
-        // fit our viewport and mjr_setBuffer(mjFB_OFFSCREEN) falls back to the
-        // window framebuffer (causing solid-colour or black images).
-        model_->vis.global.offwidth  = max_w;
-        model_->vis.global.offheight = max_h;
-
         RCLCPP_INFO(rclcpp::get_logger("MujocoWorldSingleton"),
             "\033[34mCamera offscreen FBO: %dx%d for %zu camera(s)  |  rate=%.1f Hz  pointcloud=%s\033[0m",
             max_w, max_h, cameras_.size(),
@@ -486,17 +596,31 @@ void MujocoWorldSingleton::startCameraThread()
     }
     if (cam_running_.load()) return;
 
-    if (!offscreen_window_)
-    {
-        RCLCPP_WARN(rclcpp::get_logger("MujocoWorldSingleton"),
-            "\033[33mOffscreen GLFW window not available – camera thread not started.\033[0m");
-        return;
-    }
-
     cam_running_.store(true);
+
+    model_->vis.global.offwidth = offscreen_width_;
+    model_->vis.global.offheight = offscreen_height_;
 
     camera_thread_ = std::thread([this]()
     {
+        // Create an independent GL context for camera rendering.  Do not share
+        // it with the viewer context; MuJoCo will upload resources for this
+        // context when mjr_makeContext() is called below.
+        glfwWindowHint(GLFW_DECORATED, GLFW_FALSE);
+        glfwWindowHint(GLFW_SAMPLES, 0);
+        offscreen_window_ = glfwCreateWindow(1, 1, "mujoco_offscreen", nullptr, nullptr);
+        glfwDefaultWindowHints();
+
+        if (!offscreen_window_)
+        {
+            RCLCPP_WARN(rclcpp::get_logger("MujocoWorldSingleton"),
+                "\033[33mglfwCreateWindow (offscreen) failed – camera publishing disabled\033[0m");
+            cam_running_.store(false);
+            return;
+        }
+
+        glfwHideWindow(offscreen_window_);
+
         // Claim the offscreen OpenGL context on this thread.
         glfwMakeContextCurrent(offscreen_window_);
 
@@ -513,9 +637,8 @@ void MujocoWorldSingleton::startCameraThread()
         mjr_defaultContext(&con);
         mjr_makeContext(model_, &con, mjFONTSCALE_100);
 
-        // Switch to MuJoCo's offscreen FBO.  discoverCameras() already set
-        // model->vis.global.offwidth/offheight = max camera resolution, so
-        // mjr_makeContext created the FBO at the right size (con.offFBO != 0).
+        // Switch to MuJoCo's offscreen FBO. startCameraThread() set
+        // model->vis.global.offwidth/offheight before this context was made.
         mjr_setBuffer(mjFB_OFFSCREEN, &con);
 
         RCLCPP_INFO(rclcpp::get_logger("MujocoWorldSingleton"),
@@ -711,7 +834,9 @@ void MujocoWorldSingleton::startCameraThread()
         // ---- Cleanup ----
         mjv_freeScene(&scn);
         mjr_freeContext(&con);
-        glfwMakeContextCurrent(nullptr);  // release context so render_thread_ can destroy it
+        glfwMakeContextCurrent(nullptr);
+        glfwDestroyWindow(offscreen_window_);
+        offscreen_window_ = nullptr;
     });
 
     RCLCPP_INFO(rclcpp::get_logger("MujocoWorldSingleton"),
@@ -721,7 +846,7 @@ void MujocoWorldSingleton::startCameraThread()
 
 void MujocoWorldSingleton::stopCameraThread()
 {
-    if (!cam_running_.load()) return;
+    if (!cam_running_.load() && !camera_thread_.joinable()) return;
     cam_running_.store(false);
     if (camera_thread_.joinable()) camera_thread_.join();
 }
@@ -785,7 +910,7 @@ void MujocoWorldSingleton::stopSimulation()
 }
 
 // ---------------------------------------------------------------------------
-// Viewer (passive GLFW window)
+// Viewer (GLFW window)
 // ---------------------------------------------------------------------------
 
 void MujocoWorldSingleton::startViewer()
@@ -803,21 +928,7 @@ void MujocoWorldSingleton::startViewer()
     {
         auto sim = std::make_unique<mujoco::Simulate>(
             std::make_unique<mujoco::GlfwAdapter>(),
-            &cam_, &opt_, &pert_, /*is_passive=*/true);
-
-        // Create a tiny hidden window just to get an OpenGL context for the
-        // camera thread.  The actual render target is MuJoCo's offscreen FBO
-        // (mjFB_OFFSCREEN), whose size is set via model->vis.global.offwidth/
-        // offheight in discoverCameras(), so the window dimensions don't matter.
-        glfwWindowHint(GLFW_VISIBLE, GLFW_FALSE);
-        offscreen_window_ = glfwCreateWindow(1, 1, "mujoco_offscreen", nullptr, nullptr);
-        glfwDefaultWindowHints();  // restore defaults
-
-        if (!offscreen_window_)
-        {
-            RCLCPP_WARN(rclcpp::get_logger("MujocoWorldSingleton"),
-                "\033[33mglfwCreateWindow (offscreen) failed – camera publishing disabled\033[0m");
-        }
+            &cam_, &opt_, &pert_, /*is_passive=*/false);
 
         {
             std::lock_guard<std::mutex> lk(sim_ready_mtx_);
@@ -828,13 +939,6 @@ void MujocoWorldSingleton::startViewer()
 
         sim_->RenderLoop();
 
-        // Camera thread is always stopped before this point (destructor order),
-        // so it is safe to destroy the offscreen window here.
-        if (offscreen_window_)
-        {
-            glfwDestroyWindow(offscreen_window_);
-            offscreen_window_ = nullptr;
-        }
     });
 
     {
@@ -850,7 +954,22 @@ void MujocoWorldSingleton::stopViewer()
 {
     if (!sim_) return;
     sim_->exitrequest.store(1);
-    if (render_thread_.joinable()) render_thread_.join();
+    if (render_thread_.joinable()) {
+        if (render_thread_.get_id() == std::this_thread::get_id()) {
+            // mju_error called exit() from inside the render thread.
+            // We must not join ourselves (undefined behaviour), and we must
+            // not call ~GlfwAdapter() either: glfwTerminate() was already
+            // registered as an atexit handler and ran before this C++ static
+            // destructor, so GLFW's TLS is gone and any subsequent GLFW call
+            // (glfwMakeContextCurrent, glfwDestroyWindow) will assert.
+            // The process is already dying via exit(), so orphaning the
+            // Simulate+GlfwAdapter object is safe — the OS reclaims everything.
+            render_thread_.detach();
+            (void)sim_.release();
+            return;
+        }
+        render_thread_.join();
+    }
     sim_.reset();
 }
 

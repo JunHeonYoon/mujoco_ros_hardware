@@ -33,7 +33,9 @@ hardware_interface::CallbackReturn MujocoHardwareInterface::on_init(const hardwa
         return hardware_interface::CallbackReturn::ERROR;
     }
 
-    MujocoWorldSingleton::get().registerPlugin(sub_handler_->scenePriority());
+    auto & world = MujocoWorldSingleton::get();
+    world.primeGraphicsRuntime();
+    world.registerPlugin(sub_handler_->scenePriority());
 
     return sub_handler_->onInit(info);
 }
@@ -79,6 +81,8 @@ hardware_interface::return_type MujocoHardwareInterface::perform_command_mode_sw
     if (MujocoWorldSingleton::get().isSceneLoaded()) return hardware_interface::return_type::OK;
     if (sub_handler_->scenePriority() < MujocoWorldSingleton::get().maxPriority()) return hardware_interface::return_type::OK;
     if (!sub_handler_->isReadyToLoadScene()) return hardware_interface::return_type::OK;
+
+    MujocoWorldSingleton::get().unlockRealtimeMemoryForGraphics();
 
     // Read xacro path + base args from controller_manager ROS params.
     // Done here (not in on_init) because the executor must be running for SyncParametersClient.

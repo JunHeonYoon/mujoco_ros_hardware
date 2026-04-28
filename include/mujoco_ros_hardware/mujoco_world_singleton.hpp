@@ -46,6 +46,10 @@ public:
     int  totalPlugins() const { return total_plugins_; }
     int  maxPriority()  const { return max_priority_; }
 
+    // Prepare process-wide graphics state before GLFW starts.
+    void primeGraphicsRuntime();
+    void unlockRealtimeMemoryForGraphics();
+
     // ---- Init: reads mujoco_scene_xacro_path and mujoco_scene_xacro_args
     //      from controller_manager ROS params (like robot_description).
     //      Called once by the first plugin's on_init(). ----
@@ -102,6 +106,7 @@ private:
     };
 
     void discoverCameras();
+    void prepareRenderOptions();
     sensor_msgs::msg::CameraInfo buildCameraInfoMsg(const CameraDesc & cam) const;
     void startCameraThread();
     void stopCameraThread();
@@ -144,9 +149,9 @@ private:
     rclcpp::Node::SharedPtr cam_node_;
     std::thread             camera_thread_;
     std::atomic<bool>       cam_running_ {false};
-    // Hidden window sized to max camera resolution – render to its default
-    // framebuffer (mjFB_WINDOW) to avoid offscreen FBO complications.
-    GLFWwindow *            offscreen_window_ = nullptr;  // created in render_thread_
+    // Hidden window for the camera thread's OpenGL context. MuJoCo renders to
+    // an offscreen FBO sized from the discovered camera resolutions.
+    GLFWwindow *            offscreen_window_ = nullptr;
     int                     offscreen_width_  = 640;
     int                     offscreen_height_ = 480;
 
