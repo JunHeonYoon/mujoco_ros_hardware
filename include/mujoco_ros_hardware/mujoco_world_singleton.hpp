@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <atomic>
 #include <condition_variable>
 #include <limits>
@@ -18,6 +19,8 @@
 #include "rclcpp/rclcpp.hpp"
 #include <sensor_msgs/msg/image.hpp>
 #include <sensor_msgs/msg/camera_info.hpp>
+#include <sensor_msgs/msg/imu.hpp>
+#include <sensor_msgs/msg/magnetic_field.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
 #include <sensor_msgs/msg/point_field.hpp>
 
@@ -106,6 +109,23 @@ private:
     void startCameraThread();
     void stopCameraThread();
 
+    // ---- IMU publishing ----
+    struct ImuDesc {
+        std::string frame_id;   // frame_id written to message header
+        int acc_adr  = -1;      // sensordata index for accelerometer (3 values)
+        int gyro_adr = -1;      // sensordata index for gyro (3 values)
+        int mag_adr  = -1;      // sensordata index for magnetometer (3 values), -1 if absent
+        std::array<double, 9> orientation_cov = {0.01,0,0, 0,0.01,0, 0,0,0.01};
+        std::array<double, 9> linear_cov      = {0.01,0,0, 0,0.01,0, 0,0,0.01};
+        std::array<double, 9> angular_cov     = {0.01,0,0, 0,0.01,0, 0,0,0.01};
+        rclcpp::Publisher<sensor_msgs::msg::Imu>::SharedPtr pub;
+        rclcpp::Publisher<sensor_msgs::msg::MagneticField>::SharedPtr mag_pub;
+    };
+
+    void discoverImus();
+    void startImuThread();
+    void stopImuThread();
+
     // ---- Registration state ----
     int total_plugins_ = 0;
     int max_priority_  = 0;
@@ -144,6 +164,20 @@ private:
     rclcpp::Node::SharedPtr cam_node_;
     std::thread             camera_thread_;
     std::atomic<bool>       cam_running_ {false};
+
+    // ---- IMU config (read from controller_manager params via imu.yaml) ----
+    std::string           imu_topic_override_;     // if set: overrides the auto-generated topic
+    std::string           imu_frame_id_override_;  // if set: overrides the site name as frame_id
+    std::array<double, 9> imu_orientation_cov_default_ = {0.01,0,0, 0,0.01,0, 0,0,0.01};
+    std::array<double, 9> imu_linear_cov_default_      = {0.01,0,0, 0,0.01,0, 0,0,0.01};
+    std::array<double, 9> imu_angular_cov_default_     = {0.01,0,0, 0,0.01,0, 0,0,0.01};
+
+    // ---- IMU publishing ----
+    std::vector<ImuDesc>    imus_;
+    rclcpp::Node::SharedPtr imu_node_;
+    std::thread             imu_thread_;
+    std::atomic<bool>       imu_running_ {false};
+    double                  imu_publish_rate_hz_ = 100.0;
     // Hidden window sized to max camera resolution – render to its default
     // framebuffer (mjFB_WINDOW) to avoid offscreen FBO complications.
     GLFWwindow *            offscreen_window_ = nullptr;  // created in render_thread_

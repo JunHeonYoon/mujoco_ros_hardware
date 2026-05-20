@@ -9,13 +9,16 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 find_package(ament_cmake REQUIRED)
+find_package(ament_index_cpp REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(rclcpp_action REQUIRED)
 find_package(hardware_interface REQUIRED)
 find_package(pluginlib REQUIRED)
 find_package(sensor_msgs REQUIRED)
+find_package(nav_msgs REQUIRED)
 find_package(std_srvs REQUIRED)
 find_package(franka_msgs REQUIRED)
+find_package(yaml-cpp REQUIRED)
 find_package(mujoco REQUIRED)
 find_package(OpenGL REQUIRED)
 find_package(glfw3 QUIET)
@@ -88,6 +91,7 @@ target_include_directories(${PROJECT_NAME} PUBLIC
 target_link_libraries(${PROJECT_NAME} PUBLIC
     mujoco::mujoco
     mujoco_simulate
+    yaml-cpp
     dl
 )
 
@@ -97,8 +101,10 @@ ament_target_dependencies(${PROJECT_NAME} PUBLIC
     hardware_interface
     pluginlib
     sensor_msgs
+    nav_msgs
     std_srvs
     franka_msgs
+    ament_index_cpp
 )
 
 pluginlib_export_plugin_description_file(hardware_interface mujoco_hardware_interface_plugin.xml)
@@ -113,9 +119,12 @@ install(TARGETS
 install(DIRECTORY include/
     DESTINATION include
 )
+install(DIRECTORY config/
+    DESTINATION share/${PROJECT_NAME}/config
+)
 
 ament_export_targets(${PROJECT_NAME}_targets HAS_LIBRARY_TARGET)
-ament_export_dependencies(rclcpp rclcpp_action hardware_interface pluginlib sensor_msgs std_srvs franka_msgs)
+ament_export_dependencies(rclcpp rclcpp_action hardware_interface pluginlib sensor_msgs nav_msgs std_srvs franka_msgs ament_index_cpp)
 ament_export_include_directories(include)
 
 ament_package()

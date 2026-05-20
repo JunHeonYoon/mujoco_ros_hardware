@@ -1,0 +1,27 @@
+# IMU publisher configuration for MuJoCo simulation.
+# Loaded internally by MujocoWorldSingleton — not a ROS parameter file.
+# Mirrors microstrain_inertial_driver defaults so the downstream pipeline
+# (ZUPT → EKF) works identically for both real hardware and simulation.
+
+# Output topic: must match the input_topic of imu_zupt.py (default: imu/data)
+imu_topic: "imu/data"
+
+# Frame ID written into sensor_msgs/Imu header.frame_id
+# Must match microstrain params.yml frame_id (default: imu_link)
+imu_frame_id: "imu_link"
+
+# Publish rate [Hz]. microstrain default imu_data_rate = 100
+imu_publish_rate: 100.0
+
+# 3×3 covariance matrices (row-major, 9 elements).
+imu_orientation_cov: [0.01, 0.0, 0.0,
+                      0.0,  0.01, 0.0,
+                      0.0,  0.0,  0.01]
+
+imu_linear_cov:      [0.01, 0.0, 0.0,
+                      0.0,  0.01, 0.0,
+                      0.0,  0.0,  0.01]
+
+imu_angular_cov:     [0.01, 0.0, 0.0,
+                      0.0,  0.01, 0.0,
+                      0.0,  0.0,  0.01]

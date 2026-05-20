@@ -12,6 +12,8 @@
 #include <sstream>
 #include <unistd.h>
 
+#include <yaml-cpp/yaml.h>
+#include <ament_index_cpp/get_package_share_directory.hpp>
 #include "rclcpp/rclcpp.hpp"
 #include "rclcpp/parameter_client.hpp"
 
@@ -163,6 +165,7 @@ MujocoWorldSingleton & MujocoWorldSingleton::get()
 MujocoWorldSingleton::~MujocoWorldSingleton()
 {
     stopSimulation();
+    stopImuThread();
     stopCameraThread();   // must stop before stopViewer destroys offscreen_window_
     stopViewer();
     if (data_)  { mj_deleteData(data_);   data_  = nullptr; }
@@ -208,21 +211,47 @@ bool MujocoWorldSingleton::init()
         return false;
     }
 
+    // Load IMU config from this package's own imu.yaml (independent of launch files).
+    try {
+        const std::string imu_yaml_path =
+            ament_index_cpp::get_package_share_directory("mujoco_ros_hardware") +
+            "/config/imu.yaml";
+        const YAML::Node cfg = YAML::LoadFile(imu_yaml_path);
+
+        auto load_cov_yaml = [](const YAML::Node & node, std::array<double, 9> & dst)
+        {
+            if (!node || !node.IsSequence() || node.size() != 9) return;
+            for (std::size_t i = 0; i < 9; ++i)
+                dst[i] = node[i].as<double>();
+        };
+
+        if (cfg["imu_topic"])        imu_topic_override_    = cfg["imu_topic"].as<std::string>();
+        if (cfg["imu_frame_id"])     imu_frame_id_override_ = cfg["imu_frame_id"].as<std::string>();
+        if (cfg["imu_publish_rate"]) imu_publish_rate_hz_   = cfg["imu_publish_rate"].as<double>();
+        load_cov_yaml(cfg["imu_orientation_cov"], imu_orientation_cov_default_);
+        load_cov_yaml(cfg["imu_linear_cov"],      imu_linear_cov_default_);
+        load_cov_yaml(cfg["imu_angular_cov"],     imu_angular_cov_default_);
+    } catch (const std::exception & e) {
+        RCLCPP_WARN(rclcpp::get_logger("MujocoWorldSingleton"),
+            "\033[33mFailed to load imu.yaml: %s — using defaults\033[0m", e.what());
+    }
+
     const auto params = cli.get_parameters({
         "mujoco_scene_path",
         "mujoco_scene_xacro_path",
         "mujoco_scene_xacro_args",
         "mujoco_camera_publish_rate",
-        "mujoco_camera_publish_pointcloud"
+        "mujoco_camera_publish_pointcloud",
     });
+
     for (const auto & p : params)
     {
         if (p.get_type() == rclcpp::ParameterType::PARAMETER_NOT_SET) continue;
-        if      (p.get_name() == "mujoco_scene_path")              xml_path_                = p.as_string();
-        else if (p.get_name() == "mujoco_scene_xacro_path")        xacro_path_              = p.as_string();
-        else if (p.get_name() == "mujoco_scene_xacro_args")        xacro_base_args_         = p.as_string();
-        else if (p.get_name() == "mujoco_camera_publish_rate")     camera_publish_rate_hz_  = p.as_double();
-        else if (p.get_name() == "mujoco_camera_publish_pointcloud") publish_pointcloud_    = p.as_bool();
+        if      (p.get_name() == "mujoco_scene_path")                xml_path_               = p.as_string();
+        else if (p.get_name() == "mujoco_scene_xacro_path")          xacro_path_             = p.as_string();
+        else if (p.get_name() == "mujoco_scene_xacro_args")          xacro_base_args_        = p.as_string();
+        else if (p.get_name() == "mujoco_camera_publish_rate")       camera_publish_rate_hz_ = p.as_double();
+        else if (p.get_name() == "mujoco_camera_publish_pointcloud") publish_pointcloud_     = p.as_bool();
     }
 
     if (xml_path_.empty() && xacro_path_.empty())
@@ -292,12 +321,14 @@ bool MujocoWorldSingleton::loadSceneFromPath(const std::string & xml_path)
 
     RCLCPP_INFO(
         rclcpp::get_logger("MujocoWorldSingleton"),
-        "\033[34mScene loaded: nq=%d nv=%d nu=%d njnt=%d ncam=%d\033[0m",
-        model_->nq, model_->nv, model_->nu, model_->njnt, model_->ncam);
+        "\033[34mScene loaded: nq=%d nv=%d nu=%d njnt=%d ncam=%d nsensor=%d\033[0m",
+        model_->nq, model_->nv, model_->nu, model_->njnt, model_->ncam, model_->nsensor);
 
     discoverCameras();
+    discoverImus();
     startViewer();
     startCameraThread();
+    startImuThread();
     startSimulation();
     return true;
 }
@@ -346,14 +377,180 @@ bool MujocoWorldSingleton::loadSceneFromXML(const std::string & xml_string)
 
     RCLCPP_INFO(
         rclcpp::get_logger("MujocoWorldSingleton"),
-        "\033[34mScene loaded: nq=%d nv=%d nu=%d njnt=%d ncam=%d\033[0m",
-        model_->nq, model_->nv, model_->nu, model_->njnt, model_->ncam);
+        "\033[34mScene loaded: nq=%d nv=%d nu=%d njnt=%d ncam=%d nsensor=%d\033[0m",
+        model_->nq, model_->nv, model_->nu, model_->njnt, model_->ncam, model_->nsensor);
 
     discoverCameras();
+    discoverImus();
     startViewer();
     startCameraThread();
+    startImuThread();
     startSimulation();
     return true;
+}
+
+// ---------------------------------------------------------------------------
+// IMU publishing
+// ---------------------------------------------------------------------------
+
+void MujocoWorldSingleton::discoverImus()
+{
+    imus_.clear();
+
+    if (!model_ || model_->nsensor == 0)
+    {
+        RCLCPP_INFO(rclcpp::get_logger("MujocoWorldSingleton"), "No sensors in MJCF.");
+        return;
+    }
+
+    // Group accelerometer + gyro by site id.
+    // sensors.xml.xacro convention:
+    //   accelerometer name="${prefix}imu_acc"  site="${prefix}imu"
+    //   gyro           name="${prefix}imu_gyro" site="${prefix}imu"
+    std::map<int, ImuDesc> by_site;
+
+    for (int i = 0; i < model_->nsensor; ++i)
+    {
+        const int type = model_->sensor_type[i];
+        if (type != mjSENS_ACCELEROMETER && type != mjSENS_GYRO && type != mjSENS_MAGNETOMETER)
+            continue;
+
+        const int site_id = model_->sensor_objid[i];
+        auto & desc = by_site[site_id];
+
+        if (desc.frame_id.empty())
+        {
+            const char * site_name = mj_id2name(model_, mjOBJ_SITE, site_id);
+            desc.frame_id = !imu_frame_id_override_.empty()
+                ? imu_frame_id_override_
+                : (site_name ? site_name : ("site_" + std::to_string(site_id)));
+        }
+
+        if (type == mjSENS_ACCELEROMETER)
+            desc.acc_adr  = model_->sensor_adr[i];
+        else if (type == mjSENS_GYRO)
+            desc.gyro_adr = model_->sensor_adr[i];
+        else
+            desc.mag_adr  = model_->sensor_adr[i];
+    }
+
+    // Only publish IMUs that have both acc and gyro.
+    if (by_site.empty()) return;
+
+    imu_node_ = rclcpp::Node::make_shared("mujoco_imu_publisher");
+
+    for (auto & [site_id, desc] : by_site)
+    {
+        if (desc.acc_adr < 0 || desc.gyro_adr < 0) continue;
+
+        desc.orientation_cov = imu_orientation_cov_default_;
+        desc.linear_cov      = imu_linear_cov_default_;
+        desc.angular_cov     = imu_angular_cov_default_;
+
+        const std::string topic = !imu_topic_override_.empty()
+            ? imu_topic_override_
+            : ("/mujoco_ros_hardware/" + desc.frame_id + "/imu");
+        desc.pub = imu_node_->create_publisher<sensor_msgs::msg::Imu>(topic, 10);
+
+        if (desc.mag_adr >= 0)
+        {
+            const std::string mag_topic = "/mujoco_ros_hardware/" + desc.frame_id + "/mag";
+            desc.mag_pub = imu_node_->create_publisher<sensor_msgs::msg::MagneticField>(mag_topic, 10);
+        }
+
+        RCLCPP_INFO(rclcpp::get_logger("MujocoWorldSingleton"),
+            "\033[34mIMU discovered: frame_id=%s  acc_adr=%d  gyro_adr=%d  mag_adr=%d  -> %s\033[0m",
+            desc.frame_id.c_str(), desc.acc_adr, desc.gyro_adr, desc.mag_adr, topic.c_str());
+
+        imus_.push_back(std::move(desc));
+    }
+}
+
+void MujocoWorldSingleton::startImuThread()
+{
+    if (imus_.empty())
+    {
+        RCLCPP_INFO(rclcpp::get_logger("MujocoWorldSingleton"),
+            "No IMUs found - IMU thread not started.");
+        return;
+    }
+    if (imu_running_.load()) return;
+
+    imu_running_.store(true);
+
+    imu_thread_ = std::thread([this]()
+    {
+        const auto period = std::chrono::duration<double>(1.0 / imu_publish_rate_hz_);
+        auto next = std::chrono::steady_clock::now();
+
+        while (imu_running_.load())
+        {
+            next += std::chrono::duration_cast<std::chrono::steady_clock::duration>(period);
+
+            {
+                std::lock_guard<std::mutex> lock(data_mutex_);
+                if (data_)
+                {
+                    const auto stamp = imu_node_->now();
+                    for (const auto & imu : imus_)
+                    {
+                        sensor_msgs::msg::Imu msg;
+                        msg.header.stamp    = stamp;
+                        msg.header.frame_id = imu.frame_id;
+
+                        msg.linear_acceleration.x = data_->sensordata[imu.acc_adr + 0];
+                        msg.linear_acceleration.y = data_->sensordata[imu.acc_adr + 1];
+                        msg.linear_acceleration.z = data_->sensordata[imu.acc_adr + 2];
+
+                        msg.angular_velocity.x = data_->sensordata[imu.gyro_adr + 0];
+                        msg.angular_velocity.y = data_->sensordata[imu.gyro_adr + 1];
+                        msg.angular_velocity.z = data_->sensordata[imu.gyro_adr + 2];
+
+                        for (int k = 0; k < 9; ++k)
+                        {
+                            msg.orientation_covariance[k]         = imu.orientation_cov[k];
+                            msg.angular_velocity_covariance[k]    = imu.angular_cov[k];
+                            msg.linear_acceleration_covariance[k] = imu.linear_cov[k];
+                        }
+
+                        imu.pub->publish(msg);
+
+                        // Publish magnetometer if available.
+                        if (imu.mag_adr >= 0 && imu.mag_pub)
+                        {
+                            sensor_msgs::msg::MagneticField mag_msg;
+                            mag_msg.header.stamp    = stamp;
+                            mag_msg.header.frame_id = imu.frame_id;
+
+                            mag_msg.magnetic_field.x = data_->sensordata[imu.mag_adr + 0];
+                            mag_msg.magnetic_field.y = data_->sensordata[imu.mag_adr + 1];
+                            mag_msg.magnetic_field.z = data_->sensordata[imu.mag_adr + 2];
+
+                            // Small covariance — MuJoCo mag is noise-free.
+                            mag_msg.magnetic_field_covariance[0] = 1e-9;
+                            mag_msg.magnetic_field_covariance[4] = 1e-9;
+                            mag_msg.magnetic_field_covariance[8] = 1e-9;
+
+                            imu.mag_pub->publish(mag_msg);
+                        }
+                    }
+                }
+            }
+
+            std::this_thread::sleep_until(next);
+        }
+    });
+
+    RCLCPP_INFO(rclcpp::get_logger("MujocoWorldSingleton"),
+        "\033[34mIMU thread started (%.1f Hz, %zu IMU(s))\033[0m",
+        imu_publish_rate_hz_, imus_.size());
+}
+
+void MujocoWorldSingleton::stopImuThread()
+{
+    if (!imu_running_.load()) return;
+    imu_running_.store(false);
+    if (imu_thread_.joinable()) imu_thread_.join();
 }
 
 // ---------------------------------------------------------------------------
@@ -402,7 +599,7 @@ void MujocoWorldSingleton::discoverCameras()
         //   /mujoco_ros_hardware/<name>/depth/camera_info
         //   /mujoco_ros_hardware/<name>/depth/points           (optional)
         const std::string base = "/mujoco_ros_hardware/" + cam.topic_name;
-        const auto qos = rclcpp::QoS(1);
+        const auto qos = rclcpp::QoS(1).best_effort();
 
         if (cam.publish_rgb) {
             cam.rgb_pub      = cam_node_->create_publisher<sensor_msgs::msg::Image>     (base + "/color/image_raw",      qos);
@@ -472,7 +669,7 @@ MujocoWorldSingleton::buildCameraInfoMsg(const CameraDesc & cam) const
     info.p = {fx,  0.0, cx,  0.0,
               0.0, fy,  cy,  0.0,
               0.0, 0.0, 1.0, 0.0};
-    info.header.frame_id = cam.name + "_optical_frame";
+    info.header.frame_id = cam.name;// + "_optical_frame";
     return info;
 }
 
@@ -588,7 +785,7 @@ void MujocoWorldSingleton::startCameraThread()
                 // ---- Build header ----
                 std_msgs::msg::Header hdr;
                 hdr.stamp    = stamp;
-                hdr.frame_id = cam.name + "_optical_frame";
+                hdr.frame_id = cam.name;// + "_optical_frame";
 
                 // ---- PointCloud2 (optional, before moving rgb_buf) ----
                 if (publish_pointcloud_ && cam.cloud_pub)
